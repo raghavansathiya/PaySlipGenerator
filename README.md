@@ -19,7 +19,9 @@ Copy src/main/resources/taxcategory.json to your home dir
 
 ### Testing the application
 
-Sample input data
+Sample input data has been provided below. 
+
+```curl -H "Content-Type: application/json" --data @Request.json http://localhost:8080/generatepayslip```
 
 ```[
   {
