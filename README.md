@@ -11,9 +11,9 @@ Clone or download the project and run the following maven command
 
 ```mvn clean package```
 
-Copy src/main/resources/taxcategory.json to your home dir
-
 ### Starting the application
+
+Copy src/main/resources/taxcategory.json to your home dir
 
 ```java -jar target/EmployeePayrollSystem-spring-boot.jar```
 
