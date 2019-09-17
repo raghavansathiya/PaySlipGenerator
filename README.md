@@ -1,4 +1,4 @@
-# Project Title
+# PaySlip Generator
 
 Springboot application that generates payslip for list of employees for the provided taxcategory
 
