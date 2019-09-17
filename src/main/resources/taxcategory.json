@@ -1,0 +1,30 @@
+{
+  "taxYear": "2017-2018",
+  "taxBrackets": [
+    {
+      "minIncome": 0,
+      "maxIncome" : 18200,
+      "taxRate" : 0
+    },
+    {
+      "minIncome": 18201,
+      "maxIncome" : 37000,
+      "taxRate" : 19
+    },
+    {
+      "minIncome": 37001,
+      "maxIncome" : 87000,
+      "taxRate" : 32.5
+    },
+    {
+      "minIncome": 87001,
+      "maxIncome" : 180000,
+      "taxRate" : 37
+    },
+    {
+      "minIncome": 180001,
+      "maxIncome" : -1,
+      "taxRate" : 45
+    }
+  ]
+}
