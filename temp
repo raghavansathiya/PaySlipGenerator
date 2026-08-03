@@ -1,0 +1,986 @@
+Because the box contents are fixed, your wife does **not** need modifiers or a second data-entry screen. She sells one of six variations in Square, and the application identifies the variation by its immutable Square catalogue ID:
+
+| Square variation sold                  | Application inventory effect                         |
+| -------------------------------------- | ---------------------------------------------------- |
+| Christmas Tree — Individual            | None; Square deducts 1 automatically                 |
+| Christmas Tree — Box of 7              | Deduct 7 Christmas Tree candles + 1 seven-candle box |
+| Bulk Christmas Tree Small — Individual | None; Square deducts 1 automatically                 |
+| Bulk Christmas Tree Small — Box of 3   | Deduct 3 small candles + 1 applicable box            |
+| Bulk Christmas Tree Tall — Individual  | None; Square deducts 1 automatically                 |
+| Bulk Christmas Tree Tall — Box of 3    | Deduct 3 tall candles + 1 applicable box             |
+
+Square makes POS-created orders available through the Orders API, and `SearchOrders` can retrieve completed orders incrementally. Square inventory is tracked at catalogue-variation level, but its general Inventory API does not model arbitrary bundles and their separate packaging components, so the application can supply that recipe logic and post adjustments with `BatchChangeInventory`. ([Square][1])
+
+Square now also has a Retail Plus stock-conversion feature for selling the same product in different units. However, it requires Square for Retail Plus and still does not represent the separate cardboard/package box consumed by your bundle. The prompt below deliberately uses one consistent application-managed recipe model and avoids mixing the two approaches. ([Square][2])
+
+## Copy-paste prompt for Claude Code
+
+```text
+You are a senior full-stack engineer and systems designer. Design and implement a production-quality MVP called “Candle Stock Reconciler”.
+
+First inspect the existing repository and preserve its established conventions. If the repository is empty, scaffold the application using:
+
+- Current stable Next.js with App Router
+- TypeScript in strict mode
+- PostgreSQL
+- Prisma ORM
+- Tailwind CSS
+- A simple, clean responsive admin UI
+- Vitest for unit and integration tests
+- Playwright for a small number of critical end-to-end tests
+
+Do not stop after producing an architecture plan. Create the plan, implement the application, run migrations, run tests, run type checking, run linting, and run a production build. Resolve issues before finishing.
+
+Do not ask me routine design questions. Make sensible assumptions, document them, and continue. Credentials must be represented by environment variables and mocked during development.
+
+# Business context
+
+My wife sells candles through Square Point of Sale at markets.
+
+She must continue to perform each sale only once, in Square. She must not enter the sale or its components into this application afterwards.
+
+The application must periodically read completed Square sales, infer the physical stock consumed, update Square inventory, and produce stock and sales reports.
+
+Real-time data is not required.
+
+Do not use Square webhooks.
+
+Provide:
+
+1. A “Sync now” button.
+2. A protected scheduled-sync endpoint that can run periodically, such as nightly.
+3. A dry-run mode that previews inventory changes without writing them to Square.
+
+Square is the source of truth for:
+
+- Sales and prices
+- Current inventory counts after successful reconciliation
+- Catalogue item and variation identities
+
+The local database is used for:
+
+- Product mappings
+- Bundle recipes
+- Imported order snapshots
+- Audit history
+- Idempotency
+- Sync state
+- Exceptions
+- Reporting cache where useful
+
+# Products and fixed recipes
+
+There are three candle products. Each is sold individually or as a fixed box.
+
+1. Christmas Tree
+   - Individual
+   - Box of 7
+
+2. Bulk Christmas Tree Small
+   - Individual
+   - Box of 3
+
+3. Bulk Christmas Tree Tall
+   - Individual
+   - Box of 3
+
+A customer cannot mix candle types inside these boxes. The compositions are fixed.
+
+Model the initial recipes as:
+
+A. CHRISTMAS_TREE_BOX_7
+   - Sale variation: Christmas Tree / Box of 7
+   - Consume 7 units of Christmas Tree / Individual
+   - Consume 1 unit of the mapped seven-candle packaging box
+
+B. BULK_CHRISTMAS_TREE_SMALL_BOX_3
+   - Sale variation: Bulk Christmas Tree Small / Box of 3
+   - Consume 3 units of Bulk Christmas Tree Small / Individual
+   - Consume 1 unit of the mapped small three-candle packaging box
+
+C. BULK_CHRISTMAS_TREE_TALL_BOX_3
+   - Sale variation: Bulk Christmas Tree Tall / Box of 3
+   - Consume 3 units of Bulk Christmas Tree Tall / Individual
+   - Consume 1 unit of the mapped tall three-candle packaging box
+
+The small and tall box recipes might use:
+
+- Two different packaging variations, or
+- The same shared three-candle packaging variation
+
+The setup UI must support either arrangement. It must be legal for the two recipes to map to the same packaging variation.
+
+Do not hard-code Square catalogue IDs. Build a first-run setup screen that retrieves the Square catalogue and lets the administrator map Square item variation IDs to these roles:
+
+- CHRISTMAS_TREE_INDIVIDUAL
+- CHRISTMAS_TREE_BOX_7
+- BULK_CHRISTMAS_TREE_SMALL_INDIVIDUAL
+- BULK_CHRISTMAS_TREE_SMALL_BOX_3
+- BULK_CHRISTMAS_TREE_TALL_INDIVIDUAL
+- BULK_CHRISTMAS_TREE_TALL_BOX_3
+- BOX_7_PACKAGING
+- BOX_3_SMALL_PACKAGING
+- BOX_3_TALL_PACKAGING
+
+Allow BOX_3_SMALL_PACKAGING and BOX_3_TALL_PACKAGING to point to the same Square variation.
+
+Use Square catalogue object IDs for all matching. Never match production orders using item names, variation names, prices, SKUs, or fuzzy text.
+
+Names can be displayed to users but IDs control the logic.
+
+# Required Square catalogue arrangement
+
+The application should validate and explain this arrangement:
+
+- The three individual candle variations must be stock tracked in Square.
+- The raw packaging variations must be stock tracked in Square.
+- The three box-for-sale variations should not have independent stock tracking because they are assembled on demand.
+- Individual candle sales are automatically reflected in Square inventory.
+- The application must not deduct individual sales a second time.
+- Box sales are expanded by the application into their candle and packaging components.
+- The box-for-sale variation itself is not a physical stock item.
+
+Recommended Square structure:
+
+- Item: Christmas Tree
+  - Variation: Individual
+  - Variation: Box of 7
+
+- Item: Bulk Christmas Tree Small
+  - Variation: Individual
+  - Variation: Box of 3
+
+- Item: Bulk Christmas Tree Tall
+  - Variation: Individual
+  - Variation: Box of 3
+
+- Raw-material variation: Empty Box for 7 Candles
+- Raw-material variation: Empty Box for 3 Small Candles
+- Raw-material variation: Empty Box for 3 Tall Candles
+
+The last two can be replaced by one shared Empty Box for 3 Candles variation.
+
+The application must not automatically modify the Square catalogue in the MVP. It should retrieve, map, validate, and display clear corrective instructions.
+
+Treat any of the following as configuration warnings or blocking errors:
+
+- A mapped catalogue ID no longer exists
+- A component variation is not stock tracked
+- A box sale variation is itself stock tracked
+- A mapped object is not an ITEM_VARIATION
+- Two unrelated roles accidentally reference the same variation
+- A Square stock-conversion configuration would cause candle inventory to be deducted both by Square and this application
+
+Do not implement Square Retail Plus stock conversion in the MVP. Detect a conflicting stock-conversion configuration where possible and block inventory writes until it is resolved.
+
+# Core user workflow
+
+At the market, my wife uses only Square POS.
+
+Example sale:
+
+- Christmas Tree / Box of 7
+- Quantity 2
+- Square records the actual sale price and payment
+
+During the next sync, the application must infer:
+
+- Christmas Tree individual stock: minus 14
+- Seven-candle packaging stock: minus 2
+- Box sales quantity: 2
+- Box revenue: use the actual value recorded on the Square order
+
+She must not select seven component candles.
+She must not open this application during the sale.
+She must not enter the same transaction later.
+She must not maintain a second spreadsheet.
+
+Another example:
+
+- Christmas Tree / Individual quantity 1
+- Christmas Tree / Box of 7 quantity 1
+
+Expected inventory result:
+
+- Square automatically deducts 1 Christmas Tree candle for the individual line.
+- The application deducts 7 Christmas Tree candles for the box line.
+- The application deducts 1 seven-candle packaging box.
+- Overall physical Christmas Tree stock falls by 8.
+- Revenue comes from the two actual Square line items.
+
+# Square integration
+
+Use the official Square Node SDK and current official Square API documentation.
+
+Pin the chosen SDK version in package.json rather than using an unbounded version.
+
+Make the API version configurable:
+
+- SQUARE_API_VERSION
+
+Use 2026-07-15 as the initial default only after checking that it is compatible with the installed SDK.
+
+Use these Square capabilities:
+
+- Locations API, or configured location ID
+- Catalog API to retrieve item variations
+- Orders API SearchOrders to retrieve sales
+- Inventory API BatchRetrieveInventoryCounts
+- Inventory API BatchChangeInventory
+- Refunds or Payments APIs only where required for accurate completed-refund reporting
+
+Required permissions for a future OAuth implementation should be documented, including:
+
+- ORDERS_READ
+- ITEMS_READ
+- INVENTORY_READ
+- INVENTORY_WRITE
+- MERCHANT_PROFILE_READ where required
+
+For this single-business MVP, support a server-side personal access token supplied through environment variables. Design the Square adapter so OAuth could be added later without rewriting the sync engine.
+
+Environment variables should include at least:
+
+- DATABASE_URL
+- SQUARE_ENVIRONMENT=sandbox|production
+- SQUARE_ACCESS_TOKEN
+- SQUARE_LOCATION_ID
+- SQUARE_API_VERSION
+- APP_TIMEZONE=Australia/Melbourne
+- CRON_SECRET
+- AUTH_SECRET
+- ADMIN_EMAIL or equivalent single-admin login configuration
+
+Never send the Square access token to the browser.
+Never write it to logs.
+Never commit it.
+Provide a complete .env.example file.
+
+# Order import and incremental sync
+
+Implement an incremental polling sync. Do not use webhooks.
+
+Use SearchOrders for the configured location.
+
+The order-import process must:
+
+1. Retrieve orders using an UPDATED_AT filter.
+2. Sort oldest to newest.
+3. Follow all pagination cursors.
+4. Maintain a high-water mark in the database.
+5. Re-read a configurable overlap window, such as the previous 10 minutes, to protect against boundary and timing issues.
+6. Upsert orders by Square order ID and version.
+7. Import completed POS orders.
+8. Ignore open, draft, and cancelled orders for inventory consumption.
+9. Store enough immutable line-item information for reporting and auditing.
+10. Continue processing other orders when one order produces an exception.
+
+Use UTC internally.
+Display dates in Australia/Melbourne.
+Use the Square order’s closed_at timestamp as the inventory occurred_at timestamp where available.
+If closed_at is absent, use the safest available Square transaction timestamp and record an exception or warning.
+
+Do not set calculated inventory levels with a physical count to represent sales.
+
+For sales consumption, send incremental ADJUSTMENT changes through BatchChangeInventory.
+
+# Separate reporting import from inventory automation
+
+The application must have two dates:
+
+1. Reporting history start
+   - Orders on or after this date can be imported for reports.
+
+2. Inventory automation start
+   - Only eligible box sales closed on or after this date can generate inventory adjustments.
+
+Default inventory automation start to the time the setup is activated.
+
+This is important because historical box sales might already have been manually accounted for in the spreadsheet or Square. Automatically applying every historical sale could double-deduct stock.
+
+Provide an initial dry-run/backfill preview that shows:
+
+- Orders found
+- Box lines found
+- Candle quantities that would be consumed
+- Packaging quantities that would be consumed
+- Orders that cannot be mapped
+- Any configuration errors
+
+Require an explicit action in the UI before enabling production inventory writes.
+
+Orders before the inventory automation start can still appear in sales reports but must not create Square inventory changes.
+
+# Bundle inference algorithm
+
+For every completed order line:
+
+1. Read catalog_object_id.
+2. Look up a recipe by the exact sale variation ID.
+3. Parse the Square line quantity safely from its string representation.
+4. Require an integer quantity for these products.
+5. Multiply each recipe component by the sold box quantity.
+6. Create inventory effects for the individual candle component and packaging component.
+7. Use the actual Square line amount for revenue.
+8. Never infer a recipe from the item name, price, SKU, or number of items elsewhere in the order.
+
+Examples:
+
+- 1 Christmas Tree Box of 7
+  - 7 Christmas Tree candles
+  - 1 seven-candle box
+
+- 3 Christmas Tree Boxes of 7
+  - 21 Christmas Tree candles
+  - 3 seven-candle boxes
+
+- 2 Bulk Christmas Tree Small Boxes of 3
+  - 6 Bulk Christmas Tree Small candles
+  - 2 applicable three-candle boxes
+
+- 4 Bulk Christmas Tree Tall Boxes of 3
+  - 12 Bulk Christmas Tree Tall candles
+  - 4 applicable three-candle boxes
+
+An unmapped catalogue variation is not an error unless it resembles a box product that should have been mapped. Normal unrelated Square products must be imported for overall sales reporting but ignored by the candle recipe engine.
+
+# Inventory writes and idempotency
+
+Inventory writes must be crash-safe and exactly-once from the application’s perspective.
+
+For box consumption, create Square inventory adjustments:
+
+- from_state: IN_STOCK
+- to_state: SOLD
+- location: configured Square location
+- quantity: calculated component quantity
+- occurred_at: original Square sale time
+
+Create one stable inventory effect record for every:
+
+- Square order
+- Square line-item UID
+- Recipe version
+- Component variation
+- Direction
+
+Generate a deterministic idempotency key, preferably from a SHA-256 hash or UUID v5 of those values.
+
+Required status values:
+
+- PENDING
+- APPLIED
+- FAILED
+- SKIPPED
+- NEEDS_REVIEW
+
+Use a transactional-outbox-style flow:
+
+1. Persist the planned effect and stable idempotency key.
+2. Call Square.
+3. Mark it applied and store relevant Square response identifiers.
+4. If the process crashes after Square succeeds but before the database update, retry using exactly the same Square idempotency key.
+5. Never create a different idempotency key merely because a request is retried.
+
+Group all component changes for one Square order into an atomic batch where practical. Respect Square’s batch size limits and split safely where required.
+
+Repeated syncs must not deduct stock again.
+
+A manual retry of a failed sync must not deduct an already-applied effect again.
+
+Do not update or mutate completed Square POS orders.
+
+# Refunds, returns, cancellations, and exchanges
+
+Financial refunds and physical inventory returns are not necessarily the same event.
+
+Implement the following safe MVP policy:
+
+- A cancelled or voided order that never completed consumes no inventory.
+- A completed box sale consumes components.
+- A custom monetary refund does not automatically return candles or packaging to stock.
+- An itemized return of a box should create a NEEDS_REVIEW exception.
+- Show the component quantities that could potentially be returned.
+- Provide an explicit “Restock returned components” action.
+- Default candle restock to selected/yes only after user confirmation.
+- Default packaging restock to no because a returned box might not be reusable.
+- Allow the administrator to choose the actual quantities being restocked.
+- Record returned stock using a supported inventory increase transition, such as UNLINKED_RETURN to IN_STOCK, after confirming compatibility with the current Square API.
+- Record a separate stable idempotency key for each restock action.
+- Never reverse stock merely because money was refunded.
+
+For custom refunds that cannot be attributed to a product line:
+
+- Include the refund in overall financial reporting.
+- Show it as an unallocated refund.
+- Do not guess which product should lose revenue.
+- Do not modify inventory automatically.
+
+For exchanges or unusually structured return orders, create a review exception rather than guessing.
+
+# Database model
+
+Design a normalized schema with migrations. It should include equivalent models for:
+
+MerchantConfig
+- selected Square location
+- environment
+- timezone
+- currency
+- reporting history start
+- inventory automation start
+- last order watermark
+- inventory writes enabled
+- setup status
+
+CatalogMapping
+- semantic role
+- Square catalogue variation ID
+- current display name
+- SKU where available
+- last observed catalogue version
+- current inventory-tracking status
+- validation status
+
+Recipe
+- stable recipe key
+- sale variation ID
+- version
+- effective-from timestamp
+- active status
+
+RecipeComponent
+- recipe ID
+- component variation ID
+- component kind: CANDLE or PACKAGING
+- integer quantity
+- default restock policy
+
+SquareOrder
+- Square order ID
+- Square order version
+- location ID
+- state
+- source
+- created_at
+- updated_at
+- closed_at
+- currency
+- gross sales in minor units
+- discounts in minor units
+- tax in minor units
+- total in minor units
+- refund totals
+- last seen timestamp
+- optional sanitized raw payload for troubleshooting
+
+SquareOrderLine
+- order ID
+- line-item UID
+- catalogue variation ID
+- item name snapshot
+- variation name snapshot
+- quantity
+- gross amount
+- discount amount
+- tax amount
+- total amount
+- return/refund status
+
+InventoryEffect
+- stable effect ID
+- order ID
+- line-item UID
+- recipe ID and version
+- component variation ID
+- direction
+- quantity
+- occurred_at
+- Square idempotency key
+- status
+- attempt count
+- Square response identifiers
+- last error
+- created_at
+- applied_at
+
+SyncRun
+- sync ID
+- mode: DRY_RUN or APPLY
+- start and end watermark
+- started_at
+- completed_at
+- status
+- orders fetched
+- orders imported
+- box lines found
+- inventory effects planned
+- inventory effects applied
+- inventory effects skipped
+- failures
+- summary
+
+SyncException
+- code
+- severity
+- order ID
+- line-item UID where applicable
+- human-readable message
+- structured details
+- status: OPEN or RESOLVED
+- resolution notes
+- created_at
+- resolved_at
+
+Use database uniqueness constraints, not only application checks, to prevent duplicate order lines and duplicate inventory effects.
+
+Version recipes. Once a recipe version has generated an applied inventory effect, do not mutate it retroactively. A future recipe change must create a new version with an effective date.
+
+# Money and quantity handling
+
+Use integer minor units for AUD money.
+Never use floating-point arithmetic for money.
+
+Use the exact values returned on the Square order.
+
+Do not calculate sales revenue using the current catalogue price because:
+
+- Prices can change
+- Discounts can be applied
+- Historic order prices must remain unchanged
+- A box price is not necessarily equal to the sum of individual prices
+
+Parse Square quantities with a decimal-safe method.
+For these six sale variations, validate that quantities are whole positive integers.
+
+Clearly distinguish these metrics:
+
+- Gross product sales
+- Discounts
+- Net product sales
+- Tax collected
+- Refunds
+- Total collected
+- Unallocated refunds
+
+Do not label tax as sales revenue.
+
+For product-level reporting, use Square line-item amounts.
+For overall order-level totals, use Square order totals.
+Avoid double-counting order-level service charges, tax, or tips.
+
+# Dashboard and UI
+
+Build a mobile-friendly but desktop-optimized administrative application.
+
+Required navigation:
+
+1. Dashboard
+2. Sales
+3. Inventory
+4. Sync History
+5. Exceptions
+6. Square Setup
+7. Settings
+
+## Dashboard
+
+Show:
+
+- Last successful Square sync
+- Last inventory write
+- Whether inventory automation is enabled
+- Open exception count
+- Current Square stock for each individual candle
+- Current Square stock for each packaging material
+- Boxes that can currently be assembled
+- Low-stock warnings
+- Sales summary for selected period
+- Inventory consumption summary for selected period
+
+Buildable box formulas:
+
+Christmas Tree Box of 7 capacity:
+- minimum of floor(Christmas Tree individual stock / 7) and seven-candle packaging stock
+
+Small Box of 3 capacity:
+- minimum of floor(small individual stock / 3) and mapped packaging stock
+
+Tall Box of 3 capacity:
+- minimum of floor(tall individual stock / 3) and mapped packaging stock
+
+If small and tall use the same packaging variation:
+
+- Show the shared packaging stock once.
+- Show each box capacity as an independent maximum.
+- Add a clear “shared packaging supply” indicator.
+- Do not misleadingly add the independent maximum capacities together.
+
+## Sales page
+
+Provide date filters and show:
+
+- Individual Christmas Tree quantity and revenue
+- Christmas Tree Box of 7 quantity and revenue
+- Individual Bulk Christmas Tree Small quantity and revenue
+- Small Box of 3 quantity and revenue
+- Individual Bulk Christmas Tree Tall quantity and revenue
+- Tall Box of 3 quantity and revenue
+- Physical candle units sold individually
+- Physical candle units consumed through boxes
+- Total physical candle units consumed
+- Packaging boxes consumed
+- Gross sales
+- Discounts
+- Tax
+- Refunds
+- Net sales
+- Overall collected amount
+
+Provide an order table with:
+
+- Sale date
+- Square order ID
+- Square source
+- Item and variation
+- Sold quantity
+- Actual sale amount
+- Inferred component use
+- Inventory adjustment status
+- Refund or return status
+
+## Inventory page
+
+Retrieve current Square IN_STOCK counts.
+
+Show:
+
+- Component name
+- Square variation ID
+- Current in-stock quantity
+- Low-stock threshold
+- Last count retrieved
+- Latest application adjustment
+- Whether the stock is shared by multiple recipes
+
+Include a “Refresh inventory” action that only reads Square counts.
+
+Optionally provide carefully labelled stock administration actions:
+
+- Receive newly produced candles
+- Receive newly purchased packaging
+- Record an actual physical count
+
+These actions are not sale-entry screens.
+
+Physical counts must only be used when someone has actually counted stock. Never calculate a count locally and upload it as though it were physically counted.
+
+## Sync History page
+
+Show every sync run with:
+
+- Mode
+- Time range
+- Orders read
+- Box lines found
+- Adjustments planned
+- Adjustments applied
+- Adjustments skipped
+- Errors
+- Duration
+- Expandable detail
+
+Provide:
+
+- Sync now
+- Dry run
+- Retry failed effects
+- Preview initial backfill
+
+## Exceptions page
+
+Support at least:
+
+- Missing catalogue mapping
+- Deleted or archived catalogue variation
+- Fractional quantity on a candle product
+- Invalid recipe
+- Component not stock tracked
+- Box sale variation is stock tracked
+- Possible stock-conversion conflict
+- Return requiring review
+- Unallocated refund
+- Square API error
+- Insufficient or negative stock warning
+- Missing order timestamp
+
+Show actionable remediation rather than only stack traces.
+
+## Square Setup page
+
+Provide a guided setup flow:
+
+1. Test Square connection.
+2. Retrieve available locations.
+3. Select the location.
+4. Retrieve Square catalogue variations.
+5. Map all candle and packaging roles.
+6. Validate tracking configuration.
+7. Select reporting history start.
+8. Select inventory automation start.
+9. Run a dry-run preview.
+10. Explicitly enable inventory writes.
+
+Display item name, variation name, SKU, ID, stock tracking, sellable status, stockable status, and archived status where available.
+
+# Authentication and security
+
+Implement a secure single-administrator login.
+
+All administrative pages and write endpoints require authentication.
+
+The scheduled-sync endpoint must require CRON_SECRET or a similarly strong server-to-server credential.
+
+Use CSRF protection where relevant.
+Validate all request inputs.
+Do not expose stack traces or Square secrets in production responses.
+Add basic rate limiting to login and state-changing endpoints.
+Use structured server logs with secret redaction.
+
+# Architecture and code quality
+
+Keep the Square integration behind interfaces such as:
+
+- SquareCatalogGateway
+- SquareOrdersGateway
+- SquareInventoryGateway
+- SquareRefundsGateway
+
+Keep business logic independent of the SDK:
+
+- RecipeExpansionService
+- OrderImportService
+- InventoryEffectPlanner
+- InventoryEffectExecutor
+- SalesReportingService
+- ReturnReviewService
+- CatalogValidationService
+
+The recipe expansion and idempotency logic must be testable without connecting to Square.
+
+Use dependency injection or simple constructor injection.
+Do not put all Square and database logic inside route handlers.
+Keep route handlers thin.
+Use explicit typed domain objects.
+Validate external Square data before use.
+
+Add retry handling for transient Square errors with bounded exponential backoff and jitter. Do not blindly retry validation or authentication errors.
+
+Add reasonable request timeouts.
+
+# Required API routes or server actions
+
+Implement equivalent protected functionality for:
+
+- Test Square connection
+- Fetch locations
+- Fetch catalogue
+- Save mappings
+- Validate configuration
+- Preview sync
+- Apply sync
+- Scheduled sync
+- Fetch dashboard data
+- Fetch inventory
+- Fetch sales report
+- Fetch sync history
+- Retry failed inventory effects
+- Review and restock a return
+- Resolve an exception
+
+The exact routing structure can follow repository conventions.
+
+# Tests
+
+Create comprehensive tests.
+
+At minimum, cover:
+
+1. Selling 1 Christmas Tree Box of 7 creates:
+   - 7 Christmas Tree component units
+   - 1 seven-candle packaging unit
+
+2. Selling 2 Christmas Tree Boxes of 7 creates:
+   - 14 Christmas Tree component units
+   - 2 packaging units
+
+3. Selling 2 Small Boxes of 3 creates:
+   - 6 small candle units
+   - 2 mapped packaging units
+
+4. Selling 3 Tall Boxes of 3 creates:
+   - 9 tall candle units
+   - 3 mapped packaging units
+
+5. An individual candle line creates no application inventory effect.
+
+6. A mixed order containing an individual candle and a box only creates effects for the box.
+
+7. Re-running the same sync creates no additional Square inventory effects.
+
+8. A retry after an uncertain network result uses the same Square idempotency key.
+
+9. Renaming a Square item does not break matching because catalogue IDs are used.
+
+10. An unmapped unrelated Square item is ignored by the recipe engine but remains in overall sales reporting.
+
+11. A cancelled order consumes no stock.
+
+12. A custom refund reduces financial results but does not restock components.
+
+13. An itemized bundle return creates a review exception and does not automatically restock packaging.
+
+14. Shared three-candle packaging can be mapped to both small and tall recipes.
+
+15. Orders before inventory automation start do not generate adjustments.
+
+16. Historical orders after reporting start still appear in sales reports.
+
+17. Dry-run mode makes no Inventory API write.
+
+18. Fractional bundle quantities are rejected and reported as exceptions.
+
+19. Pagination imports all Square orders.
+
+20. Watermark overlap does not duplicate inventory changes.
+
+21. Monetary calculations use integer minor units and correctly handle discounts and refunds.
+
+22. An API failure leaves an auditable failed effect that can be retried safely.
+
+Use mocked Square gateways for automated tests. Do not require real Square credentials to run the test suite.
+
+Create representative Square order fixtures for:
+
+- Individual sale
+- Box sale
+- Mixed sale
+- Multiple quantities
+- Discounted sale
+- Cancelled order
+- Custom refund
+- Itemized return
+- Renamed catalogue item
+- Paginated responses
+
+# Acceptance scenarios
+
+The implemented application is acceptable when all of these work:
+
+Scenario 1:
+- Starting Christmas Tree stock: 100
+- Starting seven-candle packaging stock: 10
+- Square sale: 1 individual Christmas Tree and 1 Box of 7
+- Square itself reduces individual stock by 1
+- The application sync reduces component stock by another 7 and packaging by 1
+- Final Christmas Tree stock: 92
+- Final packaging stock: 9
+- Dashboard reports 1 individual sold, 1 box sold, and 8 physical candles consumed
+
+Scenario 2:
+- Starting small candle stock: 30
+- Starting small packaging stock: 8
+- Square sale: 2 Small Boxes of 3
+- Application reduces small candle stock by 6
+- Application reduces packaging stock by 2
+- Final small candle stock: 24
+- Final packaging stock: 6
+
+Scenario 3:
+- Starting tall candle stock: 20
+- Square sale: 4 individual tall candles
+- Square reduces stock to 16
+- Application performs no candle inventory adjustment
+- Dashboard still reports the individual sale revenue and quantity
+
+Scenario 4:
+- Sync is run five times against the same orders
+- Inventory is deducted exactly once
+
+Scenario 5:
+- A completed box payment is refunded without a physical return
+- Revenue and refund reports are correct
+- Inventory remains consumed
+- No components are silently restocked
+
+# Deliverables
+
+Produce:
+
+- Working application
+- Database migrations
+- Seed or setup utilities where useful
+- .env.example
+- README.md
+- docs/architecture.md
+- docs/square-catalog-setup.md
+- docs/sync-and-idempotency.md
+- docs/deployment.md
+- docs/operations-and-recovery.md
+- Test fixtures
+- Unit and integration tests
+- Critical Playwright tests
+- Dockerfile or clear local deployment configuration
+- A protected scheduled-sync endpoint
+- A manual sync command or script
+- A dry-run command or script
+
+The README must contain:
+
+- Local setup
+- Square Sandbox setup
+- Required Square permissions
+- How to configure the six sale variations and packaging variations
+- How to map catalogue IDs
+- How to run a dry run
+- How to enable inventory writes
+- How to run a manual sync
+- How to configure scheduled sync
+- How to recover from a failed inventory request
+- How to move from Sandbox to Production safely
+
+# Commands and completion criteria
+
+Provide package scripts equivalent to:
+
+- dev
+- build
+- start
+- lint
+- typecheck
+- test
+- test:e2e
+- db:migrate
+- db:seed where useful
+- sync:dry-run
+- sync:apply
+
+Before completing:
+
+1. Run the database migration validation.
+2. Run lint.
+3. Run TypeScript type checking.
+4. Run all unit and integration tests.
+5. Run the production build.
+6. Fix all failures.
+7. Summarize the architecture and files created.
+8. List any remaining limitations honestly.
+9. Do not claim a real Square connection was tested unless actual credentials were available.
+10. Do not substitute mocks for production code; use mocks only in tests and local demonstration modes.
+```
+
+The current official Square changelog identifies `2026-07-15` as the API version and Node SDK `45.0.1` for that release, but the implementation prompt instructs Claude Code to verify and pin a compatible version rather than assuming it indefinitely. ([Square][3])
+
+[1]: https://developer.squareup.com/docs/orders-api/manage-orders/search-orders?utm_source=chatgpt.com "Search Orders"
+[2]: https://developer.squareup.com/docs/inventory-api/enable-stock-conversion "Enable Stock Conversion"
+[3]: https://developer.squareup.com/docs/changelog/connect-logs/2026-07-15?utm_source=chatgpt.com "Square APIs and SDKs: 2026-07-15 Changelog"
